@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<ruleset xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/squizlabs/PHP_CodeSniffer/master/phpcs.xsd"
+    name="moodle-tuchsoft"
+    >
+
+    <description>Custom Moodle standard extending moodle-strict</description>
+
+    <!-- Extend the moodle-strict standard provided -->
+    <rule ref="/var/www/moodle-plugin-ci/vendor/moodlehq/moodle-cs/moodle-extra/ruleset.xml"/>
+
+        <!-- Exclude specific sniffs as requested -->
+        <exclude name="moodle.NamingConventions.ValidVariableName" phpcbf-only="true"/>
+        <exclude name="moodle.NamingConventions.ValidFunctionName" phpcbf-only="true"/>
+
+    </rule>
+
+</ruleset>

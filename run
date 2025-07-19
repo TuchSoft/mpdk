@@ -1,0 +1,305 @@
+#!/bin/bash
+
+# --- Command Functions ---
+
+# Function for the 'up' command
+# This function handles bringing up a Moodle project using Docker.
+# Arguments:
+#   $1: VERSION (e.g., 401, 401_testing)
+#   $2: PORT (e.g., 8080)
+up() {
+
+    if [ -z "$1" ]; then
+        echo -e "Specifica una porta\nUso: $0 up <versione> <porta> (es. $0 up 401 8080)"
+        exit 1
+    fi
+
+
+    local VERSION=$1
+    local PORT=$2
+    local PROJECT="moodle-$VERSION"
+    local BIN="$ROOT/moodle-docker/bin/"
+    local WWW="http://moodle$VERSION.test:$PORT"
+
+    # Validate project directory
+    if [ ! -d "$MOODLE_PATH" ]; then
+        echo "Errore: La directory $MOODLE_PATH non esiste. Verifica che il progetto esista."
+        exit 1
+    fi
+
+    # Check if the port is already in use
+    if is_port_in_use "$PORT"; then
+        echo "Port $PORT is IN USE."
+        exit 1
+    fi
+
+    # Determine mode (TESTING or DEVELOPMENT) based on VERSION
+    if [[ "$VERSION" =~ "_testing" ]]; then
+        echo "Running in TESTING mode"
+        echo "It's probably gonna ask for your password to run correct permissions!"
+
+        # Copy configuration file
+        cp "$ROOT/moodle-docker/config.docker-template.php" "$MOODLE_PATH/config.php"
+
+        # Start Moodle with Docker
+        echo "Starting Docker containers for $PROJECT..."
+        moodle_docker "up -d"
+
+        # Install moodle-plugin-ci
+        echo "Installing moodle-plugin-ci..."
+        moodle_docker "exec webserver curl -O https://getcomposer.org/composer.phar"
+        moodle_docker "exec webserver cp composer.phar /usr/local/bin/composer"
+        moodle_docker "exec webserver chmod +x /usr/local/bin/composer"
+        moodle_docker "exec webserver curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash"
+        moodle_docker "exec webserver ~/.nvm/nvm.sh install 22.17.1"
+        moodle_docker "exec webserver ln -s ~/.nvm/versions/node/v22.17.1/bin/* /usr/local/bin/"
+        moodle_docker "exec webserver /usr/local/bin/composer create-project moodlehq/moodle-plugin-ci /var/www/moodle-plugin-ci ^4"
+        moodle_docker "exec webserver ln -s /var/www/moodle-plugin-ci/bin/moodle-plugin-ci /usr/local/bin/moodle-plugin-ci"
+
+        # Install dependencies
+        echo "Installing Moodle dependencies..."
+        moodle_docker "exec webserver /usr/local/bin/composer -d /var/www/html install"
+
+        # Ensure vendor files are executable (on the host)
+        echo "Setting execute permissions for vendor binaries..."
+        sudo chmod -R +x "$MOODLE_PATH/vendor/bin/"
+
+        # Init Behat
+        echo "Initializing Behat..."
+        moodle_docker "exec webserver php admin/tool/behat/cli/init.php --disable-composer=1"
+        
+        # Init PHPUnit
+        echo "Initializing PHPUnit..."
+        moodle_docker "exec webserver php admin/tool/phpunit/cli/init.php --disable-composer=1"
+
+        #Intall custom codestyle
+        moodle_docker "cp $ROOT/moodle-cs.xml webserver:/var/www/"
+
+    else
+        echo "Running in DEVELOPMENT mode"
+
+        export MOODLE_WEB_ROOT="$MOODLE_PATH" 
+        export MOODLE_WEB_PORT="$PORT"
+
+        # Remove existing config.php if it exists
+        if [ -f "$MOODLE_PATH/config.php" ]; then
+            echo "Removing existing config.php..."
+            rm -rf "$MOODLE_PATH/config.php"
+        fi
+
+        # Start Docker containers for development mode
+        echo "Starting Docker containers for $PROJECT (development mode)..."
+        docker compose -f "$ROOT/phpmoodle/docker-compose.yml" -p "$PROJECT" up -d
+
+        # Install Moodle database
+        echo "Installing Moodle database for $PROJECT..."
+        docker compose -f "$ROOT/phpmoodle/docker-compose.yml" -p "$PROJECT" exec server php admin/cli/install.php \
+            --non-interactive \
+            --agree-license \
+            --fullname="$PROJECT" \
+            --shortname="$PROJECT" \
+            --summary="$PROJECT Docker moodle site" \
+            --adminpass="test" \
+            --adminemail="admin@example.com" \
+            --supportemail="support@example.com" \
+            --dbtype="pgsql" \
+            --dbhost="database" \
+            --dbname="moodle" \
+            --dbuser="moodle" \
+            --dbpass="moodle" \
+            --dbport="moodle" \
+            --wwwroot="$WWW"
+        echo "ADMIN PASSWORD: test"
+        echo "Opening Moodle in browser: $WWW"
+        open "$WWW"
+    fi
+}
+
+
+check() {
+    if [ -z "$1" ]; then
+        echo -e "Specifica un plugin\nUso: $0 check <plugin> (es. $0 check local/myplugin)"
+        exit 1
+    fi
+
+    local PLUGIN=$1
+
+    if [[ ! "$VERSION" =~ "_testing" ]]; then
+        echo "Devi usare una versione '_testing' per eseguire i check"
+        exit 1
+    fi
+
+
+   
+   CMD="exec webserver moodle-plugin-ci"
+   PLUGIN="/var/www/html/$PLUGIN"
+
+    moodle_docker "$CMD validate  -n $PLUGIN"
+    moodle_docker "$CMD phpcs  -n -s /var/www/moodle-cs.xml --todo-comment-regex=\"TODO:\" $PLUGIN"
+    moodle_docker "$CMD savepoints -n  $PLUGIN"
+    moodle_docker "$CMD phplint  -n $PLUGIN"
+    moodle_docker "$CMD phpmd -n  $PLUGIN"
+    moodle_docker "$CMD phpdoc -n $PLUGIN"
+    moodle_docker "$CMD mustache  -n $PLUGIN"
+    moodle_docker "$CMD grunt  -n -t gherkinlint $PLUGIN"
+    moodle_docker "$CMD grunt  -n -t stylelint $PLUGIN"
+}
+
+
+test() {
+    if [ -z "$1" ]; then
+        echo -e "Specifica un plugin\nUso: $0 check <plugin> (es. $0 check local/myplugin)"
+        exit 1
+    fi
+
+    local PLUGIN=$1
+
+    if [[ ! "$VERSION" =~ "_testing" ]]; then
+        echo "Devi usare una versione '_testing' per eseguire i check"
+        exit 1
+    fi
+   
+   CMD="exec webserver moodle-plugin-ci"
+   PLUGIN="/var/www/html/$PLUGIN"
+
+    moodle_docker "$CMD phpunit -n $PLUGIN"
+    moodle_docker "$CMD behat -n $PLUGIN"
+}
+
+
+js() {
+    if [ -z "$1" ]; then
+        echo -e "Specifica un plugin\nUso: $0 js <plugin> [--force] (es. $0 js local/myplugin [--force])"
+        exit 1
+    fi
+
+    local PLUGIN=$1
+
+    if [[ ! "$VERSION" =~ "_testing" ]]; then
+        echo "Devi usare una versione '_testing' per eseguire il comando"
+        exit 1
+    fi
+   
+
+    moodle_docker "exec webserver moodle-plugin-ci grunt -n -t amd -t yui -m /var/www/html $2 $PLUGIN"
+}
+
+
+fix() {
+    if [ -z "$1" ]; then
+        echo -e "Specifica un plugin\nUso: $0 fix <plugin>  (es. $0 fix local/myplugin)"
+        exit 1
+    fi
+
+    local PLUGIN=$1
+
+    if [[ ! "$VERSION" =~ "_testing" ]]; then
+        echo "Devi usare una versione '_testing' per eseguire il comando"
+        exit 1
+    fi
+   
+
+    moodle_docker "exec webserver moodle-plugin-ci phpcbf -s /var/www/moodle-cs.xml -n $PLUGIN"
+}
+
+
+
+
+
+
+
+
+# --- Private Functions ---
+
+# Function to check if a command exists
+command_exists() {
+    command -v "$1" &> /dev/null
+}
+
+# Function to check if a port is in use
+is_port_in_use() {
+    local port=$1
+    if command_exists netstat; then
+        netstat -tuln | grep -q ":$port\s"
+    elif command_exists lsof; then
+        lsof -i tcp:"$port" -sTCP:LISTEN &> /dev/null
+    else
+        echo "Warning: Neither 'netstat' nor 'lsof' found. Cannot check port availability." >&2
+        return 1 # Assume port might be in use if we can't check
+    fi
+}
+
+
+moodle_docker() {
+    export COMPOSE_PROJECT_NAME="moodle-$VERSION"
+    export MOODLE_DOCKER_WWWROOT="$ROOT/$VERSION"
+    export MOODLE_DOCKER_DB=pgsql
+    export MOODLE_DOCKER_WWWROOT="$MOODLE_PATH"
+    
+    $ROOT/moodle-docker/bin/moodle-docker-compose $1
+}
+
+
+
+
+
+
+
+
+
+
+
+# --- Main Script Logic ---
+
+# Check for required commands (dependencies)
+if ! command_exists netstat && ! command_exists lsof; then
+    echo "Error: Neither 'netstat' nor 'lsof' command found. Please install net-tools or lsof."
+    exit 1
+fi
+
+USE="Uso: $0 <comando> <versione> [argomenti]"
+if [ -z "$1" ]; then
+    echo -e "Specifica un comando\n$USE"
+    exit 1
+fi
+
+if [ -z "$2" ]; then
+    echo -e "Specifica una versione\n$USE"
+    exit 1
+fi
+
+
+# Globals
+ROOT="/Users/mattiabonzi/Progetti/Moodle_versions"
+COMMAND=$1
+VERSION=$2
+MOODLE_PATH="$ROOT/$VERSION"
+
+# Shift arguments so that $1, $2, etc., now refer to the arguments *after* the command
+shift 2
+
+# Use a case statement to handle different commands
+case "$COMMAND" in
+    up)
+        up "$@"
+        ;;
+    test)
+        test "$@"
+        ;;
+    check)
+        check "$@"
+        ;;
+    js)
+        js "$@"
+        ;;
+    fix)
+        fix "$@"
+        ;;
+    *)
+        echo -e "Comando non riconosciuto: '$COMMAND'\n$USE"
+        echo -e "Comandi disponibili: up, check, test, js, fix"
+        exit 1
+        ;;
+esac
+
+exit 0
