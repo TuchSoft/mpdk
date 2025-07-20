@@ -1,0 +1,6 @@
+[submodule "phpmoodle"]
+	path = phpmoodle
+	url = https://github.com/tuchsoft/phpmoodle.git
+[submodule "moodle-docker"]
+	path = moodle-docker
+	url = https://github.com/moodlehq/moodle-docker.git

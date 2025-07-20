@@ -1,0 +1,4 @@
+services:
+  webserver:
+    environment:
+      PHP_IDE_CONFIG: "serverName=${COMPOSE_PROJECT_NAME}"
